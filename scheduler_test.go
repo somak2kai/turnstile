@@ -1,7 +1,6 @@
 package turnstile
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"math/rand/v2"
@@ -10,8 +9,6 @@ import (
 	"os"
 	"runtime"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,11 +21,11 @@ import (
 // Time is compressed so a run takes seconds, not minutes. The real setup has
 // LLM calls of 0.5–5s; the fake takes 1–10ms, about 500× faster. Everything
 // that depends on call speed is scaled by the same factor:
-//   - tenant shares (tokens per minute, from testdata/shares.env) are multiplied by speedup, so tenants
-//     cross their share at the same point relative to the work done;
+//   - each model's TPM is multiplied by speedup, so the model gate closes at
+//     the same point relative to the work done;
 //   - the per-request deadline is 30s / speedup = 60ms.
 //
-// The 60s usage window is not scaled, so share accounting behaves as in
+// The 60s usage window is not scaled, so usage accounting behaves as in
 // production within a run.
 const (
 	fakeMinLatency = 1 * time.Millisecond
@@ -36,7 +33,6 @@ const (
 	speedup        = 500.0
 	reqTimeout     = time.Duration(float64(30*time.Second) / speedup)
 	noisyTenant    = "pebbleapp"
-	sharesFile     = "testdata/shares.env" // copy of pizzashop/.env
 )
 
 // TestMain starts a pprof endpoint for Parca to scrape when PPROF_ADDR is set:
@@ -117,7 +113,7 @@ type sender struct {
 	rate   float64
 	models []model
 
-	sent, served, timedOut, rejected atomic.Int64
+	sent, served atomic.Int64
 }
 
 func newSenders(noisy bool) []*sender {
@@ -156,58 +152,16 @@ func (p *picker) pick() *sender {
 	return p.senders[min(i, len(p.senders)-1)]
 }
 
-// loadShares reads <model>__<tenant>=<tokens per minute> lines, the same
-// format and parsing as pizzashop's loadShares. A plain line parser instead of
-// godotenv keeps the package free of a dependency that only the test needs.
-func loadShares(path string) (map[model]map[string]float64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+// scaleLimits multiplies every model's TPM by speedup (see top of file) and
+// restores the real limits afterwards.
+func scaleLimits(b *testing.B) {
+	prev := modelLimits
+	scaled := make(map[model]modelLimit, len(prev))
+	for m, l := range prev {
+		scaled[m] = modelLimit{RPM: l.RPM, TPM: l.TPM * speedup}
 	}
-	defer f.Close()
-
-	shares := map[model]map[string]float64{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, fmt.Errorf("bad line %q: want <model>__<tenant>=<tpm>", line)
-		}
-		m, tenant, ok := strings.Cut(key, "__") // "c_haiku4_5", "northwind"
-		if !ok {
-			return nil, fmt.Errorf("bad key %q: want <model>__<tenant>", key)
-		}
-		n, err := strconv.ParseFloat(value, 64)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", key, err)
-		}
-		if shares[model(m)] == nil {
-			shares[model(m)] = map[string]float64{}
-		}
-		shares[model(m)][tenant] = n
-	}
-	return shares, sc.Err()
-}
-
-// setShares loads the .env shares into the package-level config that shareOf
-// reads, scaled by speedup (see top of file), and restores it afterwards.
-func setShares(b *testing.B) {
-	shares, err := loadShares(sharesFile)
-	if err != nil {
-		b.Fatalf("loading %s: %v", sharesFile, err)
-	}
-	for _, tenants := range shares {
-		for t := range tenants {
-			tenants[t] *= speedup
-		}
-	}
-	prev := modelTenantShare
-	modelTenantShare = shares
-	b.Cleanup(func() { modelTenantShare = prev })
+	modelLimits = scaled
+	b.Cleanup(func() { modelLimits = prev })
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +191,7 @@ func BenchmarkScheduler(b *testing.B) {
 }
 
 func runLoad(b *testing.B, pol fairnesspolicy[*tenant], noisy bool) {
-	setShares(b)
+	scaleLimits(b)
 
 	s := newscheduler(64, pol) // 64 > 35 customers: one ring slot per customer per model
 	s.llm = fakeLLM{}
@@ -251,10 +205,11 @@ func runLoad(b *testing.B, pol fairnesspolicy[*tenant], noisy bool) {
 	p := newPicker(senders)
 
 	var latMu sync.Mutex
-	var latencies []time.Duration
+	var latencies []time.Duration // served requests only
 
 	b.SetParallelism(64) // 64 × GOMAXPROCS concurrent clients
 	b.ResetTimer()
+	began := time.Now()
 	b.RunParallel(func(pb *testing.PB) {
 		var local []time.Duration
 		for pb.Next() {
@@ -268,14 +223,9 @@ func runLoad(b *testing.B, pol fairnesspolicy[*tenant], noisy bool) {
 			if err == nil && res.err != nil {
 				err = res.err
 			}
-			switch {
-			case err == nil:
+			if err == nil {
 				sd.served.Add(1)
 				local = append(local, time.Since(start))
-			case rctx.Err() != nil:
-				sd.timedOut.Add(1)
-			default:
-				sd.rejected.Add(1) // ring buffer full
 			}
 			rcancel()
 		}
@@ -285,43 +235,34 @@ func runLoad(b *testing.B, pol fairnesspolicy[*tenant], noisy bool) {
 	})
 	b.StopTimer()
 
-	report(b, senders, latencies)
+	report(b, senders, latencies, time.Since(began))
 }
 
-// report adds per-tier served % and latency percentiles to the benchmark output.
-func report(b *testing.B, senders []*sender, latencies []time.Duration) {
-	type agg struct{ sent, served, timedOut, rejected int64 }
-	byTier := map[string]*agg{}
-	var all agg
-	for _, sd := range senders {
-		a := byTier[sd.tier]
-		if a == nil {
-			a = &agg{}
-			byTier[sd.tier] = a
-		}
-		for _, x := range []*agg{a, &all} {
-			x.sent += sd.sent.Load()
-			x.served += sd.served.Load()
-			x.timedOut += sd.timedOut.Load()
-			x.rejected += sd.rejected.Load()
-		}
-	}
-	pct := func(n, d int64) float64 { return 100 * float64(n) / float64(max(d, 1)) }
+// ---------------------------------------------------------------------------
+// reporting
+// ---------------------------------------------------------------------------
 
-	b.ReportMetric(pct(all.served, all.sent), "served%")
-	b.ReportMetric(pct(all.timedOut, all.sent), "timeout%")
-	b.ReportMetric(pct(all.rejected, all.sent), "rejected%")
-	for _, t := range []string{"enterprise", "business", "growth", "starter", "noisy"} {
-		if a := byTier[t]; a != nil {
-			b.ReportMetric(pct(a.served, a.sent), t+"-served%")
-		}
+// perMinReal converts a count over a compressed run into requests per minute
+// of real time: the fake LLM is speedup× faster, so divide by speedup.
+func perMinReal(n int64, elapsed time.Duration) float64 {
+	return float64(n) / elapsed.Seconds() * 60 / speedup
+}
+
+// report adds three numbers to the benchmark line:
+//   - served%:    share of requests answered before their deadline
+//   - p99-ms:     99th percentile latency of served requests (timed-out ones have no latency)
+//   - served/min: requests served per minute, converted to real time
+func report(b *testing.B, senders []*sender, latencies []time.Duration, elapsed time.Duration) {
+	var sent, served int64
+	for _, sd := range senders {
+		sent += sd.sent.Load()
+		served += sd.served.Load()
 	}
+	b.ReportMetric(100*float64(served)/float64(max(sent, 1)), "served%")
 	if len(latencies) > 0 {
 		slices.Sort(latencies)
-		at := func(q float64) float64 {
-			return float64(latencies[int(q*float64(len(latencies)-1))]) / float64(time.Millisecond)
-		}
-		b.ReportMetric(at(0.50), "p50-ms")
-		b.ReportMetric(at(0.99), "p99-ms")
+		p99 := latencies[int(0.99*float64(len(latencies)-1))]
+		b.ReportMetric(float64(p99)/float64(time.Millisecond), "p99-ms")
 	}
+	b.ReportMetric(perMinReal(served, elapsed), "served/min")
 }
