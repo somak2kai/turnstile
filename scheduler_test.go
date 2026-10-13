@@ -39,6 +39,8 @@ const (
 //
 //	PPROF_ADDR=:1122 go test -run xxx -bench Scheduler -benchtime 4m
 //
+// PPROF_ADDR=:1122 go test -run xxx -bench 'Scheduler/leastserved/noisy=true' -benchtime 4m -timeout 30m to run specific cases.
+//
 // Without PPROF_ADDR the tests and benchmarks run as normal.
 func TestMain(m *testing.M) {
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
