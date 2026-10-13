@@ -158,7 +158,7 @@ func (s *scheduler) dispatch(ctx context.Context, m model, limit int) {
 		g.Go(func() error {
 
 			// call llm
-			res, err := s.llm.doCall(ctx, j.req)
+			res, err := s.llm.doCall(j.ctx, j.req)
 			if err != nil {
 				j.res <- &response{err: err}
 				return nil

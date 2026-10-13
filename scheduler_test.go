@@ -1,12 +1,14 @@
 package turnstile
 
-//this is written by claude.
 import (
 	"bufio"
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof/* on http.DefaultServeMux
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +38,25 @@ const (
 	noisyTenant    = "pebbleapp"
 	sharesFile     = "testdata/shares.env" // copy of pizzashop/.env
 )
+
+// TestMain starts a pprof endpoint for Parca to scrape when PPROF_ADDR is set:
+//
+//	PPROF_ADDR=:1122 go test -run xxx -bench Scheduler -benchtime 4m
+//
+// Without PPROF_ADDR the tests and benchmarks run as normal.
+func TestMain(m *testing.M) {
+	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
+		runtime.SetBlockProfileRate(10_000)  // record blocking on channels, select, wg (sampled below 10µs)
+		runtime.SetMutexProfileFraction(100) // record 1 in 100 contended lock events
+		go func() {
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				fmt.Fprintln(os.Stderr, "pprof server:", err)
+			}
+		}()
+		fmt.Fprintln(os.Stderr, "pprof on", addr+"/debug/pprof/")
+	}
+	os.Exit(m.Run())
+}
 
 // ---------------------------------------------------------------------------
 // fake LLM
