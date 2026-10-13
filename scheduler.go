@@ -105,7 +105,7 @@ func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request)
 	lock.Lock()
 	defer lock.Unlock()
 
-	j := &job{ctx: ctx, req: req, res: make(chan *response, 1)}
+	j := &job{ctx: ctx, req: req, res: make(chan *response, 1), tenantName: tenantName}
 	// check to see if ringbuffer already has tenant . if yes append new job
 	tnt := s.tenants[model][tenantName]
 	if tnt != nil {
