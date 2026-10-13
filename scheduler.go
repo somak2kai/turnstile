@@ -230,7 +230,8 @@ func (s *scheduler) recordUsage(m model, tenant string, tokens float64) {
 
 	w, ok := s.usage[m][tenant]
 	if !ok {
-		s.usage[m][tenant] = &window{}
+		w = &window{}
+		s.usage[m][tenant] = w
 	}
 	w.add(tokens)
 
