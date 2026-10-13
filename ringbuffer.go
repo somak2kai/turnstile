@@ -17,7 +17,7 @@ func newringbuffer[T any](cap int) *ringbuffer[T] {
 }
 
 func (r *ringbuffer[T]) size() int {
-	return len(r.queue)
+	return r.count
 }
 
 // add provided element to the back of the buffer.
@@ -57,7 +57,7 @@ func (r *ringbuffer[T]) removeAt(indx int) (T, bool) {
 	t := r.queue[idx]
 
 	//everything after idx needs to move a step ahead.
-	for i := idx; i < len(r.queue)-1; i++ {
+	for i := idx; i < r.count-1; i++ {
 		r.queue[(r.head+i)%size] = r.queue[(r.head+i+1)%size]
 	}
 
