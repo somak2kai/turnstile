@@ -36,6 +36,7 @@ const (
 	// for the exercise taking a time limit.
 	avgLatency = 2 * time.Second
 	headroom   = 1.25 // 25% extra workers on top of Little's law
+	tpmGate    = 0.95 // a soft limit, dispatch only while a model's usage is below 95% of its TPM
 )
 
 // just a snapshot of rate limits taken from https://www.palantir.com/docs/foundry/aip/llm-enrollment-rate-limits as an example.
