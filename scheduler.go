@@ -149,7 +149,7 @@ func (s *scheduler) dispatch(ctx context.Context, m model, limit int) {
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(limit)
-	defer g.Wait()
+	defer g.Wait() //nolint:errcheck
 	for {
 
 		j, ok := s.nextOrWait(m)
