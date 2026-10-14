@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: turnstile
+    folder: Turnstile
+    type: file
+    allowUiUpdates: true # edit in the UI, then export JSON back into docs/grafana/
+    updateIntervalSeconds: 10 # picks up changes to the JSON file without a restart
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,44 @@
+# Local Prometheus + Grafana for watching turnstile's benchmark live.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#   METRICS_ADDR=:2223 go test -run xxx -bench 'Scheduler/leastserved/noisy=true' -benchtime 4m -timeout 30m
+#
+#   Grafana:    http://localhost:3000  (no login, dashboard "Turnstile: fairness & scheduler health")
+#   Prometheus: http://localhost:9090  (Status -> Targets should show "turnstile" UP while the benchmark runs)
+#
+#   docker compose -f deploy/docker-compose.yml down      # stop, keep data
+#   docker compose -f deploy/docker-compose.yml down -v   # stop and wipe stored metrics
+services:
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+      - --web.enable-lifecycle # lets you reload config: curl -X POST localhost:9090/-/reload
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Docker Desktop has this already; needed on colima/Linux
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      # local-only: skip the login screen
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../docs/grafana:/var/lib/grafana/dashboards:ro # the dashboard JSON you keep in the repo
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  prometheus-data:
+  grafana-data:

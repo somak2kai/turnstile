@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s # short, so a few-minute benchmark draws a useful graph
+  evaluation_interval: 5s
+
+scrape_configs:
+  # The benchmark on your Mac (METRICS_ADDR=:2223). Seen from inside the container,
+  # your Mac is host.docker.internal, not localhost.
+  - job_name: turnstile
+    static_configs:
+      - targets: ["host.docker.internal:2223"]
+    # guardrails from the cardinality discussion: fail loudly instead of eating memory
+    sample_limit: 50000
+    label_limit: 30
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
