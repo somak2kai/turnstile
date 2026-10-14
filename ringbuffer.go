@@ -20,13 +20,17 @@ func (r *ringbuffer[T]) size() int {
 	return r.count
 }
 
+func (r *ringbuffer[T]) isFull() bool {
+	return r.size() == len(r.queue)
+}
+
 // add provided element to the back of the buffer.
 // false response indicates push failed since buffer is full.
 func (r *ringbuffer[T]) push(t T) bool {
-	size := len(r.queue)
-	if r.count == size {
+	if r.isFull() {
 		return false
 	}
+	size := len(r.queue)
 	r.queue[(r.head+r.count)%size] = t
 	r.count++
 	return true

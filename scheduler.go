@@ -128,14 +128,15 @@ func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request)
 		s.log.Debug("enqueued", "model", model, "tenant", tenantName, "queued_jobs", len(tnt.jobs))
 		return j, nil
 	}
-	tnt = &tenant{name: tenantName, jobs: []*job{j}}
-	s.tenants[model][tenantName] = tnt
-	ok := s.buffer[model].push(tnt)
-	if !ok {
-		// buffer is full, return error and let clients decide on retry.
+
+	if s.buffer[model].isFull() {
 		s.log.Warn("ring buffer full, rejected", "model", model, "tenant", tenantName)
 		return nil, fmt.Errorf("ring buffer full capacity")
 	}
+
+	tnt = &tenant{name: tenantName, jobs: []*job{j}}
+	s.tenants[model][tenantName] = tnt
+	s.buffer[model].push(tnt)
 	s.log.Debug("enqueued", "model", model, "tenant", tenantName, "queued_jobs", 1, "new_in_rotation", true)
 
 	select {
