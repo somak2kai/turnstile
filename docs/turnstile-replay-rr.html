@@ -103,7 +103,7 @@ svg text{font-family:var(--mono);fill:var(--muted)}
       <li><b>The flood stays with the flooder.</b> Everyone else's requests are answered as fast as the model can work, and none of them time out. Only pebbleapp's own line gets long.</li>
       <li><b>pebbleapp gets the leftovers.</b> Whatever capacity the other customers don't need goes to pebbleapp. But pebbleapp sends far more than the model can handle, so most of its requests have waited so long in its line that they run out of time before an answer comes back.</li>
       <li><b>The budget is a rolling 60 seconds.</b> The meter fills for the first minute, then levels off as old usage drops out while new usage comes in.</li>
-      <li><b>Round robin and least served look the same here.</b> Compare with the <a href="turnstile-replay-ls.html">least-served replay</a>: both give identical results in this test, because the other customers never have to wait. The policies only differ when several heavy customers compete for the same model.</li>
+      <li>Compare with the <a href="turnstile-replay-ls.html">least-served replay</a>.</li>
     </ul>
   </section>
 
