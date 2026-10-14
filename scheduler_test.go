@@ -3,12 +3,15 @@ package turnstile
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof/* on http.DefaultServeMux
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,6 +45,11 @@ const (
 // PPROF_ADDR=:1122 go test -run xxx -bench 'Scheduler/leastserved/noisy=true' -benchtime 4m -timeout 30m to run specific cases.
 //
 // Without PPROF_ADDR the tests and benchmarks run as normal.
+//
+// SCHEDULER_LOG_DIR=/tmp/turnstile writes the scheduler's debug log (enqueued,
+// dispatched, completed, ...) to one file per sub-benchmark in that folder,
+// eg /tmp/turnstile/roundrobin_noisy=true.log. Each benchmark round overwrites
+// its file, so what remains is the final, full-length run.
 func TestMain(m *testing.M) {
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
 		runtime.SetBlockProfileRate(10_000)  // record blocking on channels, select, wg (sampled below 10µs)
@@ -154,6 +162,21 @@ func (p *picker) pick() *sender {
 	return p.senders[min(i, len(p.senders)-1)]
 }
 
+// fileLogger returns a debug-level logger writing to <dir>/<sub-benchmark>.log,
+// eg roundrobin_noisy=true.log, closed when the benchmark round ends.
+func fileLogger(b *testing.B, dir string) *slog.Logger {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		b.Fatal(err)
+	}
+	name := strings.ReplaceAll(strings.TrimPrefix(b.Name(), "BenchmarkScheduler/"), "/", "_")
+	f, err := os.Create(filepath.Join(dir, name+".log"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = f.Close() })
+	return slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
 // scaleLimits multiplies every model's TPM by speedup (see top of file) and
 // restores the real limits afterwards.
 func scaleLimits(b *testing.B) {
@@ -195,7 +218,11 @@ func BenchmarkScheduler(b *testing.B) {
 func runLoad(b *testing.B, pol fairnesspolicy[*tenant], noisy bool) {
 	scaleLimits(b)
 
-	s := newscheduler(64, pol) // 64 > 35 customers: one ring slot per customer per model
+	var logger *slog.Logger // nil: scheduler discards its logs
+	if dir := os.Getenv("SCHEDULER_LOG_DIR"); dir != "" {
+		logger = fileLogger(b, dir)
+	}
+	s := newscheduler(64, pol, logger) // 64 > 35 customers: one ring slot per customer per model
 	s.llm = fakeLLM{}
 
 	ctx, cancel := context.WithCancel(context.Background())

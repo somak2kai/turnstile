@@ -3,6 +3,7 @@ package turnstile
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -34,6 +35,8 @@ type scheduler struct {
 	llm llmprovider
 
 	fairness fairnesspolicy[*tenant]
+
+	log *slog.Logger
 }
 
 type llmprovider interface {
@@ -63,7 +66,11 @@ type request struct {
 	model model
 }
 
-func newscheduler(bufSize int, pol fairnesspolicy[*tenant]) *scheduler {
+// newscheduler builds a scheduler with a ring buffer of bufSize tenants per model.
+func newscheduler(bufSize int, pol fairnesspolicy[*tenant], logger *slog.Logger) *scheduler {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	mCfg := getWorkerConfig()
 	s := &scheduler{
 		buffer:      make(map[model]*ringbuffer[*tenant], len(mCfg)),
@@ -73,6 +80,7 @@ func newscheduler(bufSize int, pol fairnesspolicy[*tenant]) *scheduler {
 		lock:        make(map[model]*sync.Mutex, len(mCfg)),
 		wake:        make(map[model]chan struct{}, len(mCfg)),
 		fairness:    pol,
+		log:         logger,
 	}
 	for m := range mCfg {
 		// counts should be as per model
@@ -117,6 +125,7 @@ func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request)
 	tnt := s.tenants[model][tenantName]
 	if tnt != nil {
 		tnt.jobs = append(tnt.jobs, j)
+		s.log.Debug("enqueued", "model", model, "tenant", tenantName, "queued_jobs", len(tnt.jobs))
 		return j, nil
 	}
 	tnt = &tenant{name: tenantName, jobs: []*job{j}}
@@ -124,8 +133,10 @@ func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request)
 	ok := s.buffer[model].push(tnt)
 	if !ok {
 		// buffer is full, return error and let clients decide on retry.
+		s.log.Warn("ring buffer full, rejected", "model", model, "tenant", tenantName)
 		return nil, fmt.Errorf("ring buffer full capacity")
 	}
+	s.log.Debug("enqueued", "model", model, "tenant", tenantName, "queued_jobs", 1, "new_in_rotation", true)
 
 	select {
 	case s.wake[model] <- struct{}{}: //non-blocking: safe to send while holding the lock
@@ -167,6 +178,7 @@ func (s *scheduler) dispatch(ctx context.Context, m model, limit int) {
 			// call llm
 			res, err := s.llm.doCall(j.ctx, j.req)
 			if err != nil {
+				s.log.Debug("llm call failed", "model", m, "tenant", j.tenantName, "err", err)
 				j.res <- &response{err: err}
 				return nil
 			}
@@ -187,6 +199,7 @@ func (s *scheduler) nextOrWait(m model) (*job, bool) {
 	// the model's TPM is used up for the last minute: nobody can go, whoever's turn it is.
 	// we also keep a soft limit target of 95% so we escape earlier than overshooting consumption.
 	if !s.isWithinUsageLimit(m) {
+		s.log.Debug("model TPM gate closed", "model", m, "used_last_min", int(s.usage[m].usageOverLastMinute()))
 		return nil, false
 	}
 
@@ -205,9 +218,14 @@ func (s *scheduler) nextOrWait(m model) (*job, bool) {
 		t, _ := s.fairness.Next(q, score)
 
 		// if any of the job scheduled for the model+tenant combination has timed out, we take it out and consider only next one.
+		dropped := 0
 		for len(t.jobs) > 0 && t.jobs[0].ctx.Err() != nil {
 			t.jobs[0] = nil
 			t.jobs = t.jobs[1:]
+			dropped++
+		}
+		if dropped > 0 {
+			s.log.Debug("dropped abandoned jobs", "model", m, "tenant", t.name, "count", dropped, "queued_jobs", len(t.jobs))
 		}
 
 		if len(t.jobs) == 0 { // nothing live left: leave the rotation
@@ -224,6 +242,7 @@ func (s *scheduler) nextOrWait(m model) (*job, bool) {
 			// t.queued = false
 			delete(s.tenants[m], t.name)
 		}
+		s.log.Debug("dispatched", "model", m, "tenant", t.name, "queued_jobs", len(t.jobs))
 		return j, true
 
 	}
@@ -236,7 +255,13 @@ func (s *scheduler) recordUsage(m model, tenant string, tokens float64) {
 	s.lock[m].Lock()
 	defer s.lock[m].Unlock()
 
+	before := s.usage[m].usageOverLastMinute()
 	s.usage[m].add(tokens)
+	limit := modelLimits[m].TPM * tpmGate
+	s.log.Debug("completed", "model", m, "tenant", tenant, "tokens", tokens, "model_used_last_min", int(before+tokens))
+	if before < limit && before+tokens >= limit { // log once, at the moment the gate closes
+		s.log.Warn("rate limit crossed: model TPM gate closed", "model", m, "used_last_min", int(before+tokens), "limit", int(limit))
+	}
 
 	w, ok := s.tenantUsage[m][tenant]
 	if !ok {
