@@ -16,6 +16,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // The benchmark replays the load from pizzashop's main(): 35 customers in four
@@ -38,6 +42,14 @@ const (
 	noisyTenant    = "pebbleapp"
 )
 
+// metricsOn is set by TestMain when METRICS_ADDR is given.
+var metricsOn bool
+
+// currentReg holds whichever sub-benchmark call is running right now. Benchmarks re-run their
+// function repeatedly to calibrate b.N, so each call gets its own fresh registry (registering
+// the same collector twice errors); /metrics always serves the most recently started one.
+var currentReg atomic.Pointer[prometheus.Registry]
+
 // TestMain starts a pprof endpoint for Parca to scrape when PPROF_ADDR is set:
 //
 //	PPROF_ADDR=:1122 go test -run xxx -bench Scheduler -benchtime 4m
@@ -45,6 +57,8 @@ const (
 // PPROF_ADDR=:1122 go test -run xxx -bench 'Scheduler/leastserved/noisy=true' -benchtime 4m -timeout 30m to run specific cases.
 //
 // Without PPROF_ADDR the tests and benchmarks run as normal.
+//
+// METRICS_ADDR=:2223 serves turnstile_* + Go/process metrics on /metrics for Prometheus to scrape; point Grafana at it.
 //
 // SCHEDULER_LOG_DIR=/tmp/turnstile writes the scheduler's debug log (enqueued,
 // dispatched, completed, ...) to one file per sub-benchmark in that folder,
@@ -60,6 +74,24 @@ func TestMain(m *testing.M) {
 			}
 		}()
 		fmt.Fprintln(os.Stderr, "pprof on", addr+"/debug/pprof/")
+	}
+	if addr := os.Getenv("METRICS_ADDR"); addr != "" {
+		metricsOn = true
+		mux := http.NewServeMux()
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			reg := currentReg.Load()
+			if reg == nil {
+				http.Error(w, "no benchmark running yet", http.StatusServiceUnavailable)
+				return
+			}
+			promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}).ServeHTTP(w, r)
+		})
+		go func() {
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				fmt.Fprintln(os.Stderr, "metrics server:", err)
+			}
+		}()
+		fmt.Fprintln(os.Stderr, "metrics on", addr+"/metrics")
 	}
 	os.Exit(m.Run())
 }
@@ -162,14 +194,18 @@ func (p *picker) pick() *sender {
 	return p.senders[min(i, len(p.senders)-1)]
 }
 
+// benchName turns "BenchmarkScheduler/roundrobin/noisy=true" into "roundrobin_noisy=true".
+func benchName(b *testing.B) string {
+	return strings.ReplaceAll(strings.TrimPrefix(b.Name(), "BenchmarkScheduler/"), "/", "_")
+}
+
 // fileLogger returns a debug-level logger writing to <dir>/<sub-benchmark>.log,
 // eg roundrobin_noisy=true.log, closed when the benchmark round ends.
 func fileLogger(b *testing.B, dir string) *slog.Logger {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		b.Fatal(err)
 	}
-	name := strings.ReplaceAll(strings.TrimPrefix(b.Name(), "BenchmarkScheduler/"), "/", "_")
-	f, err := os.Create(filepath.Join(dir, name+".log"))
+	f, err := os.Create(filepath.Join(dir, benchName(b)+".log"))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -222,7 +258,19 @@ func runLoad(b *testing.B, pol fairnesspolicy[*tenant], noisy bool) {
 	if dir := os.Getenv("SCHEDULER_LOG_DIR"); dir != "" {
 		logger = fileLogger(b, dir)
 	}
-	s := newscheduler(64, pol, logger) // 64 > 35 customers: one ring slot per customer per model
+
+	var reg prometheus.Registerer // nil: scheduler still records metrics, just doesn't expose them
+	if metricsOn {
+		r := prometheus.NewRegistry()
+		r.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		currentReg.Store(r)
+		// "run" labels every series with the sub-benchmark name, so Grafana can tell roundrobin from leastserved etc.
+		reg = prometheus.WrapRegistererWith(prometheus.Labels{"run": benchName(b)}, r)
+	}
+	s, err := newscheduler(64, pol, logger, reg) // 64 > 35 customers: one ring slot per customer per model
+	if err != nil {
+		b.Fatal(err)
+	}
 	s.llm = fakeLLM{}
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -37,6 +39,8 @@ type scheduler struct {
 	fairness fairnesspolicy[*tenant]
 
 	log *slog.Logger
+
+	metrics *metrics
 }
 
 type llmprovider interface {
@@ -52,6 +56,8 @@ type job struct {
 	req        request
 	res        chan *response
 	tenantName string
+	enqueuedAt time.Time
+	inflight   atomic.Bool // set just before the LLM call starts
 }
 
 // minimal type for the purpose of the exercise.
@@ -67,7 +73,7 @@ type request struct {
 }
 
 // newscheduler builds a scheduler with a ring buffer of bufSize tenants per model.
-func newscheduler(bufSize int, pol fairnesspolicy[*tenant], logger *slog.Logger) *scheduler {
+func newscheduler(bufSize int, pol fairnesspolicy[*tenant], logger *slog.Logger, reg prometheus.Registerer) (*scheduler, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -91,26 +97,53 @@ func newscheduler(bufSize int, pol fairnesspolicy[*tenant], logger *slog.Logger)
 		s.wake[m] = make(chan struct{}, 1)
 		s.tenants[m] = make(map[string]*tenant)
 	}
-	return s
+	var err error
+	if s.metrics, err = newMetrics(reg, pol.name()); err != nil {
+		return nil, err
+	}
+	if reg != nil {
+		if err := reg.Register(s); err != nil { // s itself is the state collector; see metrics.go
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // clients are expected to call the schedule method for required tenants and llm requests.
 func (s *scheduler) schedule(ctx context.Context, tenantName string, req request) (*response, error) {
 	// calls enqueue
 	// returns when response available.
+	start := time.Now()
 	j, err := s.enqueue(ctx, tenantName, req)
 	if err != nil {
 		return nil, err
 	}
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case r := <-j.res:
-		return r, nil
-
+	record := func(outcome string) { // records outcome + duration once, right before each return
+		s.metrics.recordOutcome(string(req.model), tenantName, outcome)
+		s.metrics.observeDuration(string(req.model), outcome, time.Since(start))
 	}
 
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		outcome := "canceled"
+		if err == context.DeadlineExceeded {
+			outcome = "timeout_queued"
+			if j.inflight.Load() {
+				outcome = "timeout_inflight"
+			}
+		}
+		record(outcome)
+		return nil, err
+	case r := <-j.res:
+		outcome := "served"
+		if r.err != nil {
+			outcome = "llm_error"
+		}
+		record(outcome)
+		return r, nil
+	}
 }
 
 func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request) (*job, error) {
@@ -120,7 +153,7 @@ func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request)
 	lock.Lock()
 	defer lock.Unlock()
 
-	j := &job{ctx: ctx, req: req, res: make(chan *response, 1), tenantName: tenantName}
+	j := &job{ctx: ctx, req: req, res: make(chan *response, 1), tenantName: tenantName, enqueuedAt: time.Now()}
 	// check to see if ringbuffer already has tenant . if yes append new job
 	tnt := s.tenants[model][tenantName]
 	if tnt != nil {
@@ -131,6 +164,7 @@ func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request)
 
 	if s.buffer[model].isFull() {
 		s.log.Warn("ring buffer full, rejected", "model", model, "tenant", tenantName)
+		s.metrics.recordOutcome(string(model), tenantName, "rejected_queue_full")
 		return nil, fmt.Errorf("ring buffer full capacity")
 	}
 
@@ -175,6 +209,9 @@ func (s *scheduler) dispatch(ctx context.Context, m model, limit int) {
 			continue
 		}
 		g.Go(func() error {
+			j.inflight.Store(true)
+			s.metrics.inflightInc(string(m))
+			defer s.metrics.inflightDec(string(m))
 
 			// call llm
 			res, err := s.llm.doCall(j.ctx, j.req)
@@ -216,16 +253,18 @@ func (s *scheduler) nextOrWait(m model) (*job, bool) {
 			}
 			return w.usageOverLastMinute()
 		}
-		t, _ := s.fairness.Next(q, score)
+		t, _ := s.fairness.next(q, score)
 
 		// if any of the job scheduled for the model+tenant combination has timed out, we take it out and consider only next one.
 		dropped := 0
 		for len(t.jobs) > 0 && t.jobs[0].ctx.Err() != nil {
+			s.metrics.observeQueueWait(string(m), "false", time.Since(t.jobs[0].enqueuedAt))
 			t.jobs[0] = nil
 			t.jobs = t.jobs[1:]
 			dropped++
 		}
 		if dropped > 0 {
+			s.metrics.jobsAbandoned(string(m), dropped)
 			s.log.Debug("dropped abandoned jobs", "model", m, "tenant", t.name, "count", dropped, "queued_jobs", len(t.jobs))
 		}
 
@@ -243,6 +282,7 @@ func (s *scheduler) nextOrWait(m model) (*job, bool) {
 			// t.queued = false
 			delete(s.tenants[m], t.name)
 		}
+		s.metrics.observeQueueWait(string(m), "true", time.Since(j.enqueuedAt))
 		s.log.Debug("dispatched", "model", m, "tenant", t.name, "queued_jobs", len(t.jobs))
 		return j, true
 
@@ -262,6 +302,7 @@ func (s *scheduler) recordUsage(m model, tenant string, tokens float64) {
 	s.log.Debug("completed", "model", m, "tenant", tenant, "tokens", tokens, "model_used_last_min", int(before+tokens))
 	if before < limit && before+tokens >= limit { // log once, at the moment the gate closes
 		s.log.Warn("rate limit crossed: model TPM gate closed", "model", m, "used_last_min", int(before+tokens), "limit", int(limit))
+		s.metrics.gateClosed(string(m))
 	}
 
 	w, ok := s.tenantUsage[m][tenant]
@@ -270,7 +311,7 @@ func (s *scheduler) recordUsage(m model, tenant string, tokens float64) {
 		s.tenantUsage[m][tenant] = w
 	}
 	w.add(tokens)
-
+	s.metrics.tokensAdd(string(m), tenant, tokens)
 }
 
 // returns true if tokens per minute is left over for the model in question.

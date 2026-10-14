@@ -5,19 +5,22 @@ import "math"
 type fairnesspolicy[T any] interface {
 	// Next takes one element from q. score(t) is the caller's measure of
 	// how much t has consumed. Caller must hold q's lock.
-	Next(q *ringbuffer[T], score func(T) float64) (T, bool)
+	next(q *ringbuffer[T], score func(T) float64) (T, bool)
+	name() string // becomes the "policy" metric label
 }
 
 // round robin fairness.
 type roundrobin[T any] struct{}
 
-func (roundrobin[T]) Next(q *ringbuffer[T], _ func(T) float64) (T, bool) {
+func (roundrobin[T]) next(q *ringbuffer[T], _ func(T) float64) (T, bool) {
 	return q.pop() // ignores score
 }
 
+func (roundrobin[T]) name() string { return "roundrobin" }
+
 type leastserved[T any] struct{}
 
-func (leastserved[T]) Next(q *ringbuffer[T], score func(T) float64) (T, bool) {
+func (leastserved[T]) next(q *ringbuffer[T], score func(T) float64) (T, bool) {
 	best, bestScore := -1, math.MaxFloat64
 	for i, t := range q.all() {
 		if s := score(t); s < bestScore { // lower usage higher chance.
@@ -30,3 +33,5 @@ func (leastserved[T]) Next(q *ringbuffer[T], score func(T) float64) (T, bool) {
 	}
 	return q.removeAt(best)
 }
+
+func (leastserved[T]) name() string { return "leastserved" }
