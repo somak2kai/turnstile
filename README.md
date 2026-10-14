@@ -50,12 +50,12 @@ sequenceDiagram
 
 What the benchmark results show for the two different policy ( by the way i had claude write the entire scheduler_test.go)
 
-The benchmark mimics llm calls with randomized latency and tokens as usage. We set parallelism to 64 on my M1 Mac. (~640 clients)
-We use a made up tenant such as pebbleapp and overload the haiku model.
-P99 latency for both policies is ~65ms.
-We get close to ~1600 requests per minute served. 
-Now ofcourse the benchmark is sustained load of heavy traffic, 640 concurrent clients, each sending its next request as soon as the previous one finishes. 
-And we use a fake llm which is super fast returning in ~10ms , which would be much higher in real prod.
+- The benchmark mimics llm calls with randomized latency and tokens as usage. We set parallelism to 64 on my M1 Mac. (~640 clients)
+- We use a made up tenant such as pebbleapp and overload the haiku model.
+- P99 latency for both policies is ~65ms.
+- We get close to ~1600 requests per minute served. 
+- Now ofcourse the benchmark is sustained load of heavy traffic, 640 concurrent clients, each sending its next request as soon as the previous one finishes. 
+- And we use a fake llm which is super fast returning in ~10ms , which would be much higher in real prod.
 
 
 Least Served
