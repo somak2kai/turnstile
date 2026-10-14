@@ -20,6 +20,11 @@ The major parts in the codebase are :
 4. Since the fairness policy is round robin, we pop from the bounded buffer, send to llm. If jobs are remaining for tenant, we push to back.
 5. One by one queue keeps getting enqueued/dequed where each tenant sends requests to LLM in a round robin fashion.
 6. If you had dictated another policy, say least served, while selecting an tenant off the bounded queue, we chceck to see, over current usage which tenant has had the least chance to get to llm.
+---
+### See it run
+Animated replays of a benchmark run, where one customer floods the model and everyone else keeps getting answered:
+- [Round robin replay](https://somak2kai.github.io/turnstile/turnstile-replay-rr.html)
+- [Least served replay](https://somak2kai.github.io/turnstile/turnstile-replay-ls.html)
 
 ---
 ## How it works
