@@ -56,7 +56,7 @@ svg text{font-family:var(--mono);fill:var(--muted)}
 <div class="wrap">
   <header>
     <h1>One noisy customer, one AI model: round robin</h1>
-    <p class="lede">35 customers share one AI model (Claude Haiku). One customer, <b>pebbleapp</b>, floods it: about half of all traffic in the test goes to this model from that one customer. Press play and watch what Turnstile does with everyone else's requests. This replay uses the <strong>round-robin</strong> policy: customers with waiting requests take turns, one request each.</p>
+    <p class="lede">35 customers share one AI model (Claude Haiku). One customer, <b>pebbleapp</b>, floods it. pebbleapp asked for about <strong>9,700 requests a second</strong>, while Haiku can handle about <strong>3,000 a second</strong> for all customers combined. About half of all traffic in the test goes to this model from that one customer. Press play and watch what Turnstile does with everyone else's requests. This replay uses the <strong>round-robin</strong> policy: customers with waiting requests take turns, one request each.</p>
   </header>
 
   <div class="bar" role="group" aria-label="Playback">
