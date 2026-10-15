@@ -8,7 +8,7 @@ Imagine deploying a LLM feature in your multi tenant enterprise application, and
 customers by hording majority of RPM/TPM.
 
 This was a piece of discussion in my previous employment which can be summed up quite well as above. <br>
-I left before I got around to solve it, although i had pieces of it already in place , as to how I would go about solving it.
+I left before I got around to solve it, although i had few ideas in me head as to how I would go about solving it.
 This is my code which solves it the way i would have.
 
 <br>
