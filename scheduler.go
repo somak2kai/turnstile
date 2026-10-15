@@ -157,6 +157,8 @@ func (s *scheduler) enqueue(ctx context.Context, tenantName string, req request)
 	// check to see if ringbuffer already has tenant . if yes append new job
 	tnt := s.tenants[model][tenantName]
 	if tnt != nil {
+		// yes our jobs to a tenant can keep growing, right now at phase 1 this is not capped.
+		// you may want to cap it at production , could be a default or sensible numbers based off your tenants usage ratios.
 		tnt.jobs = append(tnt.jobs, j)
 		s.log.Debug("enqueued", "model", model, "tenant", tenantName, "queued_jobs", len(tnt.jobs))
 		return j, nil
