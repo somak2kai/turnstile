@@ -12,7 +12,7 @@ I left before I got around to solve it, although i had few ideas in me head as t
 This is my code which solves it the way i would have.
 
 <br>
-The major parts in the codebase are :
+The major parts in the codebase are (right now only based on TPM limits):
 
 1. A bounded ring buffer per model . Bounded buffer contains tenant->(multiple llm jobs as in requests)
 2. A scheduler runs with dictated fairness policy. Taking eg of simpler policy say round robin.
